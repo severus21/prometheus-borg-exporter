@@ -1,95 +1,105 @@
-#!/bin/bash
+#!/usr/bin/env python
+# coding: utf-8 
+import socket
+import subprocess
+import re
+from datetime import datetime
+import time
+import shutil
+from optparse import OptionParser
 
-usage() { echo "Usage: $0 -r repository" 1>&2; exit 1; }
-while getopts "r:" opt; do
-      	case $opt in
-	   	r)
-			REPOSITORY=${OPTARG}
-			;;
-		\?)
-			echo "Invalid option: -$OPTARG" >&2
-			exit 1
-			;;
-		:)
-			echo "Option -$OPTARG requires an argument." >&2
-			usage
-			exit 1
-			;;
-	esac
-done
-shift $((OPTIND-1))
+optp = OptionParser()
 
-if [ -z "${REPOSITORY}" ]; then
-	usage
-	exit 1
-fi
+optp.add_option('-r', '--repository', help='Select repository to update from',
+            dest='repository')
 
-echo "Updating Prometheus for Borg repository $REPOSITORY"
+opts, args = optp.parse_args()
 
-set -eu
+if opts.repository is None:
+    opts.repository= raw_input("Borg repository: ")
 
-BORG_PASSPHRASE=""
-#REPOSITORY=tbm-backup-tigre-bleu-multimedia@tbm-bk-02.tigre-bleu.fr:tbm-wb-02
+repository = opts.repository
 
-TEXTFILE_COLLECTOR_DIR=/var/lib/prometheus/node-exporter
-PROM_FILE=$TEXTFILE_COLLECTOR_DIR/backup.prom
-TMP_FILE=$PROM_FILE.$$
-HOSTNAME=$(hostname)
-LIST=$(BORG_PASSPHRASE=$BORG_PASSPHRASE borg list $REPOSITORY |awk '{print $1}')
-COUNTER=0
+def print_prom(archive, parameter, value):
+    tmp_file.write(parameter+"{host=\""+hostname+"\", archive=\""+archive+"\"} "+str(value)+"\n")
 
-mkdir -p $TEXTFILE_COLLECTOR_DIR
+def calc_bytes(value, unit):
+    if unit=='kB':
+        return value * 1024
+    elif unit=='MB':
+        return value * 1024 * 1024
+    elif unit=='GB':
+        return value * 1024 * 1024 * 1024
+    elif unit=='TB':
+        return value * 1024 * 1024 * 1024 * 1024
 
-for i in $LIST; do
-	COUNTER=$((COUNTER+1))
-done
-echo "backup_count{host=\"${HOSTNAME}\"} $COUNTER" > $TMP_FILE
+print "Updating Prometheus for Borg repository "+repository
+textfile_collector_dir="/var/lib/prometheus/node-exporter"
+prom_file=textfile_collector_dir+"/backup.prom"
+tmp_file_name=prom_file+".tmp"
+hostname=socket.gethostname()
 
-for i in $LIST; do
-	BORG_INFO=$(BORG_PASSPHRASE=$BORG_PASSPHRASE borg info "$REPOSITORY::$i")
-	UPDATE_DATE_RAW=$(echo "$BORG_INFO" | grep "Time (end)" | awk '{print $4}')
-	UPDATE_TIME_RAW=$(echo "$BORG_INFO" | grep "Time (end)" | awk '{print $5}')
-	UPDATE_DATE=$(date -d "$UPDATE_DATE_RAW $UPDATE_TIME_RAW" +%s)
-	echo "backup_last_update{host=\"${HOSTNAME}\", archive=\"$(echo "$i"  | cut -d '-' -f 1)\"} $UPDATE_DATE">> $TMP_FILE
-	echo "backup_files{host=\"${HOSTNAME}\", archive=\"$(echo "$i"  | cut -d '-' -f 1)\"} $(echo "$BORG_INFO" | grep "Number of files" | awk '{print $4}')" >> $TMP_FILE
-	echo "backup_chunks_unique{host=\"${HOSTNAME}\", archive=\"$(echo "$i"  | cut -d '-' -f 1)\"} $(echo "$BORG_INFO" | grep "Chunk index" | awk '{print $3}')" >> $TMP_FILE
-	echo "backup_chunks_total{host=\"${HOSTNAME}\", archive=\"$(echo "$i"  | cut -d '-' -f 1)\"} $(echo "$BORG_INFO" | grep "Chunk index" | awk '{print $4}')" >> $TMP_FILE
+cmd_borg_list=["borg","list",repository]
+proc_borg_list = subprocess.Popen(cmd_borg_list, stdout=subprocess.PIPE)
 
-	function calc_bytes {
-		NUM=$1
-		UNIT=$2
-		
-		case "$UNIT" in
-			kB)
-				echo $NUM | awk '{ print $1 * 1024 }'
-				;;
-			MB)
-				echo $NUM | awk '{ print $1 * 1024 * 1024 }'
-				;;
-			GB)
-				echo $NUM | awk '{ print $1 * 1024 * 1024 * 1024 }'
-				;;
-			TB)
-				echo $NUM | awk '{ print $1 * 1024 * 1024 * 1024 * 1024 }'
-				;;
-		esac
-	}
+archives = {}
 
-	# byte size
-	LAST_SIZE=$(calc_bytes $(echo "$BORG_INFO" |grep "This archive" |awk '{print $3}') $(echo "$BORG_INFO" |grep "This archive" |awk '{print $4}'))
-	LAST_SIZE_COMPRESSED=$(calc_bytes $(echo "$BORG_INFO" |grep "This archive" |awk '{print $5}') $(echo "$BORG_INFO" |grep "This archive" |awk '{print $6}'))
-	LAST_SIZE_DEDUP=$(calc_bytes $(echo "$BORG_INFO" |grep "This archive" |awk '{print $7}') $(echo "$BORG_INFO" |grep "This archive" |awk '{print $8}'))
-	TOTAL_SIZE=$(calc_bytes $(echo "$BORG_INFO" |grep "All archives" |awk '{print $3}') $(echo "$BORG_INFO" |grep "All archives" |awk '{print $4}'))
-	TOTAL_SIZE_COMPRESSED=$(calc_bytes $(echo "$BORG_INFO" |grep "All archives" |awk '{print $5}') $(echo "$BORG_INFO" |grep "All archives" |awk '{print $6}'))
-	TOTAL_SIZE_DEDUP=$(calc_bytes $(echo "$BORG_INFO" |grep "All archives" |awk '{print $7}') $(echo "$BORG_INFO" |grep "All archives" |awk '{print $8}'))
-	
+count_archives = 0
+for archive in proc_borg_list.stdout.readlines():
+    #print "Raw: "+archive
+    m=re.search(r"^(?P<archive>\S+)-(?P<date>\d{4}-\d{2}-\d{2})\S+(?P<time>\d{2}:\d{2}:\d{2})\S*\s", archive)
+    m2=re.search(r"^(?P<name>\S+)\s", archive)
+    if m is not None:
+        count_archives = count_archives+1
 
-	echo "backup_last_size{host=\"${HOSTNAME}\", archive=\"$(echo "$i"  | cut -d '-' -f 1)\"} $LAST_SIZE" >> $TMP_FILE
-	echo "backup_last_size_compressed{host=\"${HOSTNAME}\", archive=\"$(echo "$i"  | cut -d '-' -f 1)\"} $LAST_SIZE_COMPRESSED" >> $TMP_FILE
-	echo "backup_last_size_dedup{host=\"${HOSTNAME}\", archive=\"$(echo "$i"  | cut -d '-' -f 1)\"} $LAST_SIZE_DEDUP" >> $TMP_FILE
-	echo "backup_total_size{host=\"${HOSTNAME}\", archive=\"$(echo "$i"  | cut -d '-' -f 1)\"} $TOTAL_SIZE" >> $TMP_FILE
-	echo "backup_total_size_compressed{host=\"${HOSTNAME}\", archive=\"$(echo "$i"  | cut -d '-' -f 1)\"} $TOTAL_SIZE_COMPRESSED" >> $TMP_FILE
-	echo "backup_total_size_dedup{host=\"${HOSTNAME}\", archive=\"$(echo "$i"  | cut -d '-' -f 1)\"} $TOTAL_SIZE_DEDUP" >> $TMP_FILE
-done
+        this_archive={'name':m2.group('name'), 'datetime':datetime.strptime(m.group('date')+" "+m.group('time'), '%Y-%m-%d %H:%M:%S')}
 
-mv $TMP_FILE $PROM_FILE
+        if m.group('archive') in archives:
+            # An archive with the same name exists, we need to check which is the more recent
+            if archives[m.group('archive')]['datetime']<this_archive['datetime']:
+                archives[m.group('archive')]=this_archive
+
+
+        else:
+            # No archive exists for this name, we add it.
+            archives[m.group('archive')]=this_archive
+
+print str(len(archives))+" different archives"
+print str(count_archives)+" archives in total"
+
+# Creating empty file
+tmp_file = open(tmp_file_name,"w") 
+
+for archive, value in archives.iteritems():
+    archive_name=value['name']
+    archive_datetime=value['datetime']
+
+    print "updating "+archive+" from archive "+archive_name
+    print_prom(archive, "backup_last_update", time.mktime(archive_datetime.timetuple()))
+
+    cmd_borg_info=["borg","info",repository+"::"+archive_name]
+    proc_borg_info = subprocess.Popen(cmd_borg_info, stdout=subprocess.PIPE)
+    for line in proc_borg_info.stdout.readlines():
+        m=re.search("Number of files: (?P<files_number>\d*)", line)
+        if m:
+            print_prom(archive, "backup_files", m.group('files_number'))
+
+        m=re.search("Chunk index:\s*(?P<chunk_index_unique>\d*)\s*(?P<chunk_index_total>\d*)", line)
+        if m:
+            print_prom(archive, "backup_chunks_unique", m.group('chunk_index_unique'))
+            print_prom(archive, "backup_chunks_total", m.group('chunk_index_total'))
+
+        m=re.search("This archive:\s*(?P<original_size>\d*.\d*)\s(?P<original_size_unit>[A-Za-z]{2})\s*(?P<compressed_size>\d*.\d*)\s(?P<compressed_size_unit>[A-Za-z]{2})\s*(?P<total_size>\d*.\d*)\s(?P<total_size_unit>[A-Za-z]{2})", line)
+        if m:
+            print_prom(archive, "backup_last_size", calc_bytes(float(m.group('original_size')), m.group('original_size_unit')))
+            print_prom(archive, "backup_last_size_compressed", calc_bytes(float(m.group('compressed_size')), m.group('compressed_size_unit')))
+            print_prom(archive, "backup_last_size_dedup", calc_bytes(float(m.group('total_size')), m.group('total_size_unit')))
+
+        m=re.search("All archives:\s*(?P<original_size>\d*.\d*)\s(?P<original_size_unit>[A-Za-z]{2})\s*(?P<compressed_size>\d*.\d*)\s(?P<compressed_size_unit>[A-Za-z]{2})\s*(?P<total_size>\d*.\d*)\s(?P<total_size_unit>[A-Za-z]{2})", line)
+        if m:
+            print_prom(archive, "backup_total_size", calc_bytes(float(m.group('original_size')), m.group('original_size_unit')))
+            print_prom(archive, "backup_total_size_compressed", calc_bytes(float(m.group('compressed_size')), m.group('compressed_size_unit')))
+            print_prom(archive, "backup_total_size_dedup", calc_bytes(float(m.group('total_size')), m.group('total_size_unit')))
+
+tmp_file.close()
+shutil.move(tmp_file_name, prom_file)
