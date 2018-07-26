@@ -13,6 +13,11 @@ optp = OptionParser()
 optp.add_option('-r', '--repository', help='Select repository to update from',
             dest='repository')
 
+optp.add_option('-f', '--force-host', help='Override manually the host for this repository. Default to the local machine hostname',
+            dest='host')
+
+optp.add_option('-o', '--output', help='Set output prom filename. Default to borg.prom',
+            dest='output')
 opts, args = optp.parse_args()
 
 if opts.repository is None:
@@ -20,6 +25,17 @@ if opts.repository is None:
 
 repository = opts.repository
 
+if opts.host is None:
+    hostname=socket.gethostname()
+else:
+    hostname=opts.host
+    
+textfile_collector_dir="/var/lib/prometheus/node-exporter"
+if opts.output is None:
+    prom_file=textfile_collector_dir+"/backup.prom"
+else:
+    prom_file=textfile_collector_dir+"/"+opts.output
+    
 def print_prom(archive, parameter, value):
     tmp_file.write(parameter+"{host=\""+hostname+"\", archive=\""+archive+"\"} "+str(value)+"\n")
 
@@ -33,11 +49,8 @@ def calc_bytes(value, unit):
     elif unit=='TB':
         return value * 1024 * 1024 * 1024 * 1024
 
-print "Updating Prometheus for Borg repository "+repository
-textfile_collector_dir="/var/lib/prometheus/node-exporter"
-prom_file=textfile_collector_dir+"/backup.prom"
+print "Updating Prometheus for Borg repository "+repository+" (host: "+hostname+")"
 tmp_file_name=prom_file+".tmp"
-hostname=socket.gethostname()
 
 cmd_borg_list=["borg","list",repository]
 proc_borg_list = subprocess.Popen(cmd_borg_list, stdout=subprocess.PIPE)
