@@ -30,7 +30,7 @@ if opts.host is None:
 else:
     hostname=opts.host
     
-textfile_collector_dir="/var/lib/prometheus/node-exporter"
+textfile_collector_dir="/var/lib/node-exporter"
 if opts.output is None:
     prom_file=textfile_collector_dir+"/backup.prom"
 else:
